@@ -2,7 +2,7 @@
 <script src="${docroot}/static/js/spiderfoot.newscan.js"></script>
 <h2>New Scan</h2>
 <div style='padding-top: 20px'>
-<form class="form" action='${docroot}/startscan' method='POST'>
+<form class="form" action='${docroot}/startscan' method='POST' enctype='multipart/form-data'>
 <div class='col-sm-3' style='padding: 0'>
     <label for="scanname">Scan Name</label>
     <div class="input-group" style='padding-bottom: 10px'>
@@ -11,6 +11,13 @@
     <label for="scantarget">Scan Target</label>
     <div class="input-group">
         <input class='form-control' type="text" value="${scantarget}" id="scantarget" name="scantarget" placeholder="The target of your scan.">
+    </div>
+    <div style='padding-top: 10px'>
+        <label for="scantargetfile">Or Upload Target File</label>
+        <div class="input-group">
+            <input class='form-control' type="file" id="scantargetfile" name="scantargetfile" accept=".txt,text/plain">
+        </div>
+        <span style='font-size: 11px; color: #777'>A text file with one IP address or CIDR network block per line (e.g. <i>1.2.3.4</i> or <i>1.2.3.0/24</i>). Lines starting with '#' are ignored. A separate scan is started for each target.</span>
     </div>
 </div>
 <div class='col-sm-9' style='font-size: 12px; padding: 0; padding-left: 10px'>

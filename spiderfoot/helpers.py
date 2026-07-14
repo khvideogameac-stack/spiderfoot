@@ -245,18 +245,71 @@ class SpiderFootHelpers():
         return None
 
     @staticmethod
+    def targetsFromText(
+        text: str,
+        validTypes: typing.Optional[typing.List[str]] = None,
+    ) -> typing.List[typing.Dict[str, str]]:
+        """Parse scan targets from a block of text, one target per line.
+
+        Blank lines and lines beginning with '#' are ignored, as is any
+        inline text following a '#' on a target line (so lists can be
+        annotated with comments). This is primarily intended for parsing
+        lists of IP addresses and CIDR network blocks (IPv4 and IPv6) for
+        bulk blue team scanning, but any target type recognised by
+        SpiderFoot may be included by overriding validTypes.
+
+        Args:
+            text (str): text containing scan targets, one per line
+            validTypes (list): optional list of accepted target types. Any
+                target whose detected type is not in this list is skipped.
+                Defaults to IP address and network block types
+                (IP_ADDRESS, IPV6_ADDRESS, NETBLOCK_OWNER, NETBLOCKV6_OWNER).
+
+        Returns:
+            list: de-duplicated targets, each a dict with 'value' and 'type'
+            keys, in the order they first appear in the text.
+
+        Raises:
+            TypeError: text is not a string
+        """
+        if not isinstance(text, str):
+            raise TypeError(f"text is {type(text)}; expected str()")
+
+        if validTypes is None:
+            validTypes = ["IP_ADDRESS", "IPV6_ADDRESS", "NETBLOCK_OWNER", "NETBLOCKV6_OWNER"]
+
+        targets: typing.List[typing.Dict[str, str]] = list()
+        seen: typing.Set[str] = set()
+
+        for line in text.splitlines():
+            # Strip inline comments and surrounding whitespace
+            target = line.split('#', 1)[0].strip()
+
+            if not target:
+                continue
+
+            targetType = SpiderFootHelpers.targetTypeFromString(target)
+
+            if not targetType or targetType not in validTypes:
+                continue
+
+            if target in seen:
+                continue
+
+            seen.add(target)
+            targets.append({'value': target, 'type': targetType})
+
+        return targets
+
+    @staticmethod
     def targetsFromTargetFile(
         fileName: str,
         validTypes: typing.Optional[typing.List[str]] = None,
     ) -> typing.List[typing.Dict[str, str]]:
         """Load scan targets from a text file, one target per line.
 
-        Blank lines and lines beginning with '#' are ignored, as is any
-        inline text following a '#' on a target line (so lists can be
-        annotated with comments). This is primarily intended for loading
-        lists of IP addresses and CIDR network blocks (IPv4 and IPv6) for
-        bulk blue team scanning, but any target type recognised by
-        SpiderFoot may be included by overriding validTypes.
+        Thin wrapper around targetsFromText() that reads the targets from a
+        file on disk. See targetsFromText() for the parsing rules.
 
         Args:
             fileName (str): path to the text file containing scan targets.
@@ -281,36 +334,12 @@ class SpiderFootHelpers():
         if not fileName:
             raise ValueError("fileName value is blank")
 
-        if validTypes is None:
-            validTypes = ["IP_ADDRESS", "IPV6_ADDRESS", "NETBLOCK_OWNER", "NETBLOCKV6_OWNER"]
-
         path = os.path.expanduser(fileName)
 
         with open(path, 'r') as f:
-            lines = f.readlines()
+            text = f.read()
 
-        targets: typing.List[typing.Dict[str, str]] = list()
-        seen: typing.Set[str] = set()
-
-        for line in lines:
-            # Strip inline comments and surrounding whitespace
-            target = line.split('#', 1)[0].strip()
-
-            if not target:
-                continue
-
-            targetType = SpiderFootHelpers.targetTypeFromString(target)
-
-            if not targetType or targetType not in validTypes:
-                continue
-
-            if target in seen:
-                continue
-
-            seen.add(target)
-            targets.append({'value': target, 'type': targetType})
-
-        return targets
+        return SpiderFootHelpers.targetsFromText(text, validTypes)
 
     @staticmethod
     def urlRelativeToAbsolute(url: str) -> typing.Optional[str]:

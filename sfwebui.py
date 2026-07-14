@@ -1372,7 +1372,7 @@ class SpiderFootWebUi:
             return self.jsonify_error('500', str(e))
 
     @cherrypy.expose
-    def startscan(self: 'SpiderFootWebUi', scanname: str, scantarget: str, modulelist: str, typelist: str, usecase: str) -> str:
+    def startscan(self: 'SpiderFootWebUi', scanname: str, scantarget: str, modulelist: str, typelist: str, usecase: str, scantargetfile=None) -> str:
         """Initiate a scan.
 
         Args:
@@ -1381,44 +1381,77 @@ class SpiderFootWebUi:
             modulelist (str): comma separated list of modules to use
             typelist (str): selected modules based on produced event data types
             usecase (str): selected module group (passive, investigate, footprint, all)
+            scantargetfile: optional uploaded text file containing a list of
+                IP address / CIDR network block targets, one per line. When
+                supplied, a separate scan is started for each target.
 
         Returns:
             str: start scan status as JSON
 
         Raises:
-            HTTPRedirect: redirect to new scan info page
+            HTTPRedirect: redirect to new scan info page (single target) or
+                the scan list (multiple targets from an uploaded file)
         """
+        def wantsJson() -> bool:
+            accept = cherrypy.request.headers.get('Accept')
+            return bool(accept and 'application/json' in accept)
+
+        def errorResponse(message: str) -> str:
+            if wantsJson():
+                cherrypy.response.headers['Content-Type'] = "application/json; charset=utf-8"
+                return json.dumps(["ERROR", message]).encode('utf-8')
+            return self.error(f"Invalid request: {message}")
+
         scanname = self.cleanUserInput([scanname])[0]
         scantarget = self.cleanUserInput([scantarget])[0]
 
         if not scanname:
-            if cherrypy.request.headers.get('Accept') and 'application/json' in cherrypy.request.headers.get('Accept'):
-                cherrypy.response.headers['Content-Type'] = "application/json; charset=utf-8"
-                return json.dumps(["ERROR", "Incorrect usage: scan name was not specified."]).encode('utf-8')
+            return errorResponse("scan name was not specified.")
 
-            return self.error("Invalid request: scan name was not specified.")
+        # Read any uploaded target file (list of IP addresses / CIDR network
+        # blocks, one per line) and turn it into a list of scan targets.
+        fileTargets = list()
+        if scantargetfile is not None and getattr(scantargetfile, 'filename', None):
+            try:
+                rawTargets = scantargetfile.file.read()
+            except Exception as e:
+                return errorResponse(f"could not read the uploaded target file: {e}")
 
-        if not scantarget:
-            if cherrypy.request.headers.get('Accept') and 'application/json' in cherrypy.request.headers.get('Accept'):
-                cherrypy.response.headers['Content-Type'] = "application/json; charset=utf-8"
-                return json.dumps(["ERROR", "Incorrect usage: scan target was not specified."]).encode('utf-8')
+            if isinstance(rawTargets, bytes):
+                rawTargets = rawTargets.decode('utf-8', errors='ignore')
 
-            return self.error("Invalid request: scan target was not specified.")
+            fileTargets = SpiderFootHelpers.targetsFromText(rawTargets)
+
+            if not fileTargets:
+                return errorResponse("no valid IP address or CIDR network block targets were found in the uploaded file.")
+
+        if not scantarget and not fileTargets:
+            return errorResponse("scan target was not specified.")
 
         if not typelist and not modulelist and not usecase:
-            if cherrypy.request.headers.get('Accept') and 'application/json' in cherrypy.request.headers.get('Accept'):
-                cherrypy.response.headers['Content-Type'] = "application/json; charset=utf-8"
-                return json.dumps(["ERROR", "Incorrect usage: no modules specified for scan."]).encode('utf-8')
+            return errorResponse("no modules specified for scan.")
 
-            return self.error("Invalid request: no modules specified for scan.")
+        # Build the list of targets to scan. Each entry is a dict with
+        # 'name', 'value' and 'type' keys.
+        targets = list()
+        if fileTargets:
+            for t in fileTargets:
+                # Give each scan a distinct name so they can be told apart
+                # in the scan list.
+                targets.append({
+                    'name': f"{scanname} - {t['value']}",
+                    'value': t['value'],
+                    'type': t['type'],
+                })
+        else:
+            targetType = SpiderFootHelpers.targetTypeFromString(scantarget)
+            if targetType is None:
+                if wantsJson():
+                    cherrypy.response.headers['Content-Type'] = "application/json; charset=utf-8"
+                    return json.dumps(["ERROR", "Unrecognised target type."]).encode('utf-8')
+                return self.error("Invalid target type. Could not recognize it as a target SpiderFoot supports.")
 
-        targetType = SpiderFootHelpers.targetTypeFromString(scantarget)
-        if targetType is None:
-            if cherrypy.request.headers.get('Accept') and 'application/json' in cherrypy.request.headers.get('Accept'):
-                cherrypy.response.headers['Content-Type'] = "application/json; charset=utf-8"
-                return json.dumps(["ERROR", "Unrecognised target type."]).encode('utf-8')
-
-            return self.error("Invalid target type. Could not recognize it as a target SpiderFoot supports.")
+            targets.append({'name': scanname, 'value': scantarget, 'type': targetType})
 
         # Swap the globalscantable for the database handler
         dbh = SpiderFootDb(self.config)
@@ -1461,11 +1494,7 @@ class SpiderFootWebUi:
 
         # If we somehow got all the way through to here and still don't have any modules selected
         if not modlist:
-            if cherrypy.request.headers.get('Accept') and 'application/json' in cherrypy.request.headers.get('Accept'):
-                cherrypy.response.headers['Content-Type'] = "application/json; charset=utf-8"
-                return json.dumps(["ERROR", "Incorrect usage: no modules specified for scan."]).encode('utf-8')
-
-            return self.error("Invalid request: no modules specified for scan.")
+            return errorResponse("no modules specified for scan.")
 
         # Add our mandatory storage module
         if "sfp__stor_db" not in modlist:
@@ -1476,33 +1505,48 @@ class SpiderFootWebUi:
         if "sfp__stor_stdout" in modlist:
             modlist.remove("sfp__stor_stdout")
 
-        # Start running a new scan
-        if targetType in ["HUMAN_NAME", "USERNAME", "BITCOIN_ADDRESS"]:
-            scantarget = scantarget.replace("\"", "")
-        else:
-            scantarget = scantarget.lower()
+        # Start a scan for each target
+        scanIds = list()
+        for target in targets:
+            targetName = target['name']
+            targetValue = target['value']
+            targetType = target['type']
 
-        # Start running a new scan
-        scanId = SpiderFootHelpers.genScanInstanceId()
-        try:
-            p = mp.Process(target=startSpiderFootScanner, args=(self.loggingQueue, scanname, scanId, scantarget, targetType, modlist, cfg))
-            p.daemon = True
-            p.start()
-        except Exception as e:
-            self.log.error(f"[-] Scan [{scanId}] failed: {e}")
-            return self.error(f"[-] Scan [{scanId}] failed: {e}")
+            if targetType in ["HUMAN_NAME", "USERNAME", "BITCOIN_ADDRESS"]:
+                targetValue = targetValue.replace("\"", "")
+            else:
+                targetValue = targetValue.lower()
 
-        # Wait until the scan has initialized
-        # Check the database for the scan status results
-        while dbh.scanInstanceGet(scanId) is None:
-            self.log.info("Waiting for the scan to initialize...")
-            time.sleep(1)
+            scanId = SpiderFootHelpers.genScanInstanceId()
+            try:
+                p = mp.Process(target=startSpiderFootScanner, args=(self.loggingQueue, targetName, scanId, targetValue, targetType, modlist, cfg))
+                p.daemon = True
+                p.start()
+            except Exception as e:
+                self.log.error(f"[-] Scan [{scanId}] failed: {e}")
+                return self.error(f"[-] Scan [{scanId}] failed: {e}")
 
-        if cherrypy.request.headers.get('Accept') and 'application/json' in cherrypy.request.headers.get('Accept'):
+            # Wait until the scan has initialized
+            # Check the database for the scan status results
+            while dbh.scanInstanceGet(scanId) is None:
+                self.log.info("Waiting for the scan to initialize...")
+                time.sleep(1)
+
+            scanIds.append(scanId)
+
+        if wantsJson():
             cherrypy.response.headers['Content-Type'] = "application/json; charset=utf-8"
-            return json.dumps(["SUCCESS", scanId]).encode('utf-8')
+            # Preserve the single scan ID response for single-target scans.
+            if len(scanIds) == 1:
+                return json.dumps(["SUCCESS", scanIds[0]]).encode('utf-8')
+            return json.dumps(["SUCCESS", scanIds]).encode('utf-8')
 
-        raise cherrypy.HTTPRedirect(f"{self.docroot}/scaninfo?id={scanId}")
+        # A single target redirects to its scan info page; multiple targets
+        # (from an uploaded file) redirect to the scan list.
+        if len(scanIds) == 1:
+            raise cherrypy.HTTPRedirect(f"{self.docroot}/scaninfo?id={scanIds[0]}")
+
+        raise cherrypy.HTTPRedirect(f"{self.docroot}/")
 
     @cherrypy.expose
     @cherrypy.tools.json_out()

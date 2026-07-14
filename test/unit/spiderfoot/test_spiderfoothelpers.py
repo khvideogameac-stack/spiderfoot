@@ -517,6 +517,36 @@ class TestSpiderFootHelpers(unittest.TestCase):
         self.addCleanup(os.remove, path)
         return path
 
+    def test_targetsFromText_should_return_ip_and_cidr_targets(self):
+        text = "\n".join([
+            "# blue team list",
+            "192.168.1.10   # inline comment",
+            "10.0.0.0/8",
+            "",
+            "192.168.1.10",  # duplicate
+            "example.com",  # non-IP, skipped by default
+            "2001:db8::/32",
+        ])
+
+        targets = SpiderFootHelpers.targetsFromText(text)
+        self.assertEqual(targets, [
+            {'value': '192.168.1.10', 'type': 'IP_ADDRESS'},
+            {'value': '10.0.0.0/8', 'type': 'NETBLOCK_OWNER'},
+            {'value': '2001:db8::/32', 'type': 'NETBLOCKV6_OWNER'},
+        ])
+
+    def test_targetsFromText_validTypes_should_restrict_accepted_targets(self):
+        targets = SpiderFootHelpers.targetsFromText("example.com\n192.168.1.10", validTypes=['INTERNET_NAME'])
+        self.assertEqual(targets, [{'value': 'example.com', 'type': 'INTERNET_NAME'}])
+
+    def test_targetsFromText_empty_should_return_empty_list(self):
+        self.assertEqual(SpiderFootHelpers.targetsFromText(""), [])
+        self.assertEqual(SpiderFootHelpers.targetsFromText("# comment only\n\n"), [])
+
+    def test_targetsFromText_invalid_type_should_raise_TypeError(self):
+        with self.assertRaises(TypeError):
+            SpiderFootHelpers.targetsFromText(None)
+
     def test_targetsFromTargetFile_should_return_ip_and_cidr_targets(self):
         contents = "\n".join([
             "192.168.1.10",

@@ -495,6 +495,50 @@ class TestSpiderFootWebUi(unittest.TestCase):
         start_scan = sfwebui.startscan('example scan name', 'spiderfoot.net', '', '', '')
         self.assertIn('Invalid request: no modules specified for scan.', start_scan)
 
+    def test_start_scan_target_file_with_invalid_targets_should_return_error(self):
+        """
+        Test startscan with an uploaded target file containing no valid
+        IP address / CIDR network block targets.
+        """
+        opts = self.default_options
+        opts['__modules__'] = dict()
+        sfwebui = SpiderFootWebUi(self.web_default_options, opts)
+
+        class MockUpload:
+            filename = 'targets.txt'
+
+            class file:
+                @staticmethod
+                def read():
+                    return b"# only comments\nnot-an-ip\nexample.com\n"
+
+        start_scan = sfwebui.startscan('example scan name', '', 'module_sfp_dnsresolve', None, None, scantargetfile=MockUpload())
+        self.assertIn('no valid IP address or CIDR network block targets were found in the uploaded file.', start_scan)
+
+    def test_start_scan_target_file_should_be_accepted_without_scantarget(self):
+        """
+        Test startscan with an uploaded target file of valid IP/CIDR targets
+        but no modules; the file targets should be parsed and the flow should
+        reach (and fail at) the module validation rather than the missing
+        scantarget check.
+        """
+        opts = self.default_options
+        opts['__modules__'] = dict()
+        sfwebui = SpiderFootWebUi(self.web_default_options, opts)
+
+        class MockUpload:
+            filename = 'targets.txt'
+
+            class file:
+                @staticmethod
+                def read():
+                    return b"1.2.3.4\n10.0.0.0/8\n"
+
+        start_scan = sfwebui.startscan('example scan name', '', None, None, None, scantargetfile=MockUpload())
+        # scantarget is empty but the file provided valid targets, so the
+        # error must be about modules, not a missing target.
+        self.assertIn('Invalid request: no modules specified for scan.', start_scan)
+
     def test_start_scan_invalid_typelist_should_return_error(self):
         """
         Test startscan(self, scanname, scantarget, modulelist, typelist, usecase)
