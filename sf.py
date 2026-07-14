@@ -98,6 +98,7 @@ def main() -> None:
     p.add_argument("-M", "--modules", action='store_true', help="List available modules.")
     p.add_argument("-C", "--correlate", metavar="scanID", help="Run correlation rules against a scan ID.")
     p.add_argument("-s", metavar="TARGET", help="Target for the scan.")
+    p.add_argument("--target-file", metavar="FILE", dest="target_file", help="File containing a list of scan targets (one IP address or CIDR network block per line). Blank lines and lines starting with '#' are ignored. A scan is run for each target.")
     p.add_argument("-t", metavar="type1,type2,...", type=str, help="Event types to collect (modules selected automatically).")
     p.add_argument("-u", choices=["all", "footprint", "investigate", "passive"], type=str, help="Select modules automatically by use case")
     p.add_argument("-T", "--types", action='store_true', help="List available event types.")
@@ -249,8 +250,12 @@ def start_scan(sfConfig: dict, sfModules: dict, args, loggingQueue) -> None:
     dbh = SpiderFootDb(sfConfig, init=True)
     sf = SpiderFoot(sfConfig)
 
-    if not args.s:
-        log.error("You must specify a target when running in scan mode. Try --help for guidance.")
+    if not args.s and not args.target_file:
+        log.error("You must specify a target (-s) or a target file (--target-file) when running in scan mode. Try --help for guidance.")
+        sys.exit(-1)
+
+    if args.s and args.target_file:
+        log.error("You can only specify one of -s or --target-file, not both. Use --help for guidance.")
         sys.exit(-1)
 
     if args.x and not args.t:
@@ -273,20 +278,42 @@ def start_scan(sfConfig: dict, sfModules: dict, args, loggingQueue) -> None:
         log.error("-D can only be used when using the csv output format.")
         sys.exit(-1)
 
-    target = args.s
-    # Usernames and names - quoted on the commandline - won't have quotes,
-    # so add them.
-    if " " in target:
-        target = f"\"{target}\""
-    if "." not in target and not target.startswith("+") and '"' not in target:
-        target = f"\"{target}\""
-    targetType = SpiderFootHelpers.targetTypeFromString(target)
+    # Build the list of scan targets. Either a single target passed with -s,
+    # or a list of IP addresses / CIDR network blocks loaded from a file with
+    # --target-file. Each entry is a dict with 'value' and 'type' keys.
+    targets = list()
+    if args.target_file:
+        try:
+            targets = SpiderFootHelpers.targetsFromTargetFile(args.target_file)
+        except (OSError, TypeError, ValueError) as e:
+            log.error(f"Could not read targets from file '{args.target_file}': {e}")
+            sys.exit(-1)
 
-    if not targetType:
-        log.error(f"Could not determine target type. Invalid target: {target}")
-        sys.exit(-1)
+        if not targets:
+            log.error(f"No valid IP address or CIDR network block targets found in file: {args.target_file}")
+            sys.exit(-1)
 
-    target = target.strip('"')
+        log.info(f"Loaded {len(targets)} target(s) from {args.target_file}.")
+    else:
+        target = args.s
+        # Usernames and names - quoted on the commandline - won't have quotes,
+        # so add them.
+        if " " in target:
+            target = f"\"{target}\""
+        if "." not in target and not target.startswith("+") and '"' not in target:
+            target = f"\"{target}\""
+        targetType = SpiderFootHelpers.targetTypeFromString(target)
+
+        if not targetType:
+            log.error(f"Could not determine target type. Invalid target: {target}")
+            sys.exit(-1)
+
+        target = target.strip('"')
+        targets.append({'value': target, 'type': targetType})
+
+    # targetType is used when selecting modules (e.g. strict mode). When
+    # scanning multiple targets it is re-set per target inside the scan loop.
+    targetType = targets[0]['type']
 
     modlist = list()
     if not args.t and not args.m and not args.u:
@@ -358,31 +385,14 @@ def start_scan(sfConfig: dict, sfModules: dict, args, loggingQueue) -> None:
         sfp__stor_stdout_opts['_maxlength'] = args.S
     if args.D:
         sfp__stor_stdout_opts['_csvdelim'] = args.D
-    if args.x:
-        tmodlist = list()
-        modlist = list()
-        xmods = sf.modulesConsuming([targetType])
-        for mod in xmods:
-            if mod not in modlist:
-                tmodlist.append(mod)
+    # In strict mode the module list depends on the target type, so it is
+    # (re)built per target inside the scan loop below. Preserve the base
+    # module list selected above for non-strict scans.
+    base_modlist = modlist
 
-        # Remove any modules not producing the type requested
-        rtypes = args.t.split(",")
-        for mod in tmodlist:
-            for r in rtypes:
-                if not sfModules[mod]['provides']:
-                    continue
-                if r in sfModules[mod].get('provides', []) and mod not in modlist:
-                    modlist.append(mod)
-
-    if len(modlist) == 0:
+    if not args.x and len(base_modlist) == 0:
         log.error("Based on your criteria, no modules were enabled.")
         sys.exit(-1)
-
-    modlist += ["sfp__stor_db", "sfp__stor_stdout"]
-
-    if sfConfig['__logging']:
-        log.info(f"Modules enabled ({len(modlist)}): {','.join(modlist)}")
 
     cfg = sf.configUnserialize(dbh.configGet(), sfConfig)
 
@@ -424,38 +434,76 @@ def start_scan(sfConfig: dict, sfModules: dict, args, loggingQueue) -> None:
 
         print(headers)
 
-    # Start running a new scan
-    scanName = target
-    scanId = SpiderFootHelpers.genScanInstanceId()
-    try:
-        p = mp.Process(target=startSpiderFootScanner, args=(loggingQueue, scanName, scanId, target, targetType, modlist, cfg))
-        p.daemon = True
-        p.start()
-    except BaseException as e:
-        log.error(f"Scan [{scanId}] failed: {e}")
-        sys.exit(-1)
+    # Run a scan for each target. With -s there is a single target; with
+    # --target-file there may be many (IP addresses / CIDR network blocks).
+    exit_code = 0
+    for scanTarget in targets:
+        target = scanTarget['value']
+        targetType = scanTarget['type']
 
-    # Poll for scan status until completion
-    while True:
-        time.sleep(1)
-        info = dbh.scanInstanceGet(scanId)
-        if not info:
+        # Determine the modules to run for this target.
+        modlist = list(base_modlist)
+        if args.x:
+            tmodlist = list()
+            modlist = list()
+            xmods = sf.modulesConsuming([targetType])
+            for mod in xmods:
+                if mod not in modlist:
+                    tmodlist.append(mod)
+
+            # Remove any modules not producing the type requested
+            rtypes = args.t.split(",")
+            for mod in tmodlist:
+                for r in rtypes:
+                    if not sfModules[mod]['provides']:
+                        continue
+                    if r in sfModules[mod].get('provides', []) and mod not in modlist:
+                        modlist.append(mod)
+
+        if len(modlist) == 0:
+            log.error(f"Based on your criteria, no modules were enabled for target {target}.")
+            exit_code = -1
             continue
-        if info[5] in ["ERROR-FAILED", "ABORT-REQUESTED", "ABORTED", "FINISHED"]:
-            # allow 60 seconds for post-scan correlations to complete
-            timeout = 60
-            p.join(timeout=timeout)
-            if (p.is_alive()):
-                log.error(f"Timeout reached ({timeout}s) waiting for scan {scanId} post-processing to complete.")
-                sys.exit(-1)
 
-            if sfConfig['__logging']:
-                log.info(f"Scan completed with status {info[5]}")
-            if args.o == "json":
-                print("]")
-            sys.exit(0)
+        modlist = modlist + ["sfp__stor_db", "sfp__stor_stdout"]
 
-    return
+        if sfConfig['__logging']:
+            log.info(f"Modules enabled ({len(modlist)}): {','.join(modlist)}")
+
+        # Start running a new scan
+        scanName = target
+        scanId = SpiderFootHelpers.genScanInstanceId()
+        try:
+            p = mp.Process(target=startSpiderFootScanner, args=(loggingQueue, scanName, scanId, target, targetType, modlist, cfg))
+            p.daemon = True
+            p.start()
+        except BaseException as e:
+            log.error(f"Scan [{scanId}] failed: {e}")
+            exit_code = -1
+            continue
+
+        # Poll for scan status until completion
+        while True:
+            time.sleep(1)
+            info = dbh.scanInstanceGet(scanId)
+            if not info:
+                continue
+            if info[5] in ["ERROR-FAILED", "ABORT-REQUESTED", "ABORTED", "FINISHED"]:
+                # allow 60 seconds for post-scan correlations to complete
+                timeout = 60
+                p.join(timeout=timeout)
+                if (p.is_alive()):
+                    log.error(f"Timeout reached ({timeout}s) waiting for scan {scanId} post-processing to complete.")
+                    exit_code = -1
+
+                if sfConfig['__logging']:
+                    log.info(f"Scan of '{target}' completed with status {info[5]}")
+                break
+
+    if args.o == "json":
+        print("]")
+
+    sys.exit(exit_code)
 
 
 def start_web_server(sfWebUiConfig: dict, sfConfig: dict, loggingQueue=None) -> None:

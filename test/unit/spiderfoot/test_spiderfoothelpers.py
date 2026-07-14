@@ -1,4 +1,7 @@
 # test_spiderfoot.py
+import os
+import tempfile
+
 import pytest
 import unittest
 
@@ -505,3 +508,90 @@ class TestSpiderFootHelpers(unittest.TestCase):
         safe = SpiderFootHelpers.sanitiseInput("12")
         self.assertIsInstance(safe, bool)
         self.assertFalse(safe)
+
+    def _write_target_file(self, contents):
+        """Write contents to a temporary file and return its path."""
+        fd, path = tempfile.mkstemp(suffix='.txt')
+        with os.fdopen(fd, 'w') as f:
+            f.write(contents)
+        self.addCleanup(os.remove, path)
+        return path
+
+    def test_targetsFromTargetFile_should_return_ip_and_cidr_targets(self):
+        contents = "\n".join([
+            "192.168.1.10",
+            "10.0.0.0/8",
+            "2001:db8::/32",
+            "::1",
+            "2606:4700:4700::1111",
+        ])
+        path = self._write_target_file(contents)
+
+        targets = SpiderFootHelpers.targetsFromTargetFile(path)
+        self.assertIsInstance(targets, list)
+        self.assertEqual(targets, [
+            {'value': '192.168.1.10', 'type': 'IP_ADDRESS'},
+            {'value': '10.0.0.0/8', 'type': 'NETBLOCK_OWNER'},
+            {'value': '2001:db8::/32', 'type': 'NETBLOCKV6_OWNER'},
+            {'value': '::1', 'type': 'IPV6_ADDRESS'},
+            {'value': '2606:4700:4700::1111', 'type': 'IPV6_ADDRESS'},
+        ])
+
+    def test_targetsFromTargetFile_should_ignore_comments_blanks_and_duplicates(self):
+        contents = "\n".join([
+            "# a comment line",
+            "",
+            "   ",
+            "192.168.1.10   # inline comment",
+            "192.168.1.10",  # duplicate
+            "\t10.0.0.0/8\t",  # surrounding whitespace
+        ])
+        path = self._write_target_file(contents)
+
+        targets = SpiderFootHelpers.targetsFromTargetFile(path)
+        self.assertEqual(targets, [
+            {'value': '192.168.1.10', 'type': 'IP_ADDRESS'},
+            {'value': '10.0.0.0/8', 'type': 'NETBLOCK_OWNER'},
+        ])
+
+    def test_targetsFromTargetFile_should_skip_non_ip_targets_by_default(self):
+        contents = "\n".join([
+            "example.com",
+            "not-an-ip-or-cidr",
+            "192.168.1.10",
+        ])
+        path = self._write_target_file(contents)
+
+        targets = SpiderFootHelpers.targetsFromTargetFile(path)
+        self.assertEqual(targets, [
+            {'value': '192.168.1.10', 'type': 'IP_ADDRESS'},
+        ])
+
+    def test_targetsFromTargetFile_validTypes_should_restrict_accepted_targets(self):
+        contents = "\n".join([
+            "example.com",
+            "192.168.1.10",
+        ])
+        path = self._write_target_file(contents)
+
+        targets = SpiderFootHelpers.targetsFromTargetFile(path, validTypes=['INTERNET_NAME'])
+        self.assertEqual(targets, [
+            {'value': 'example.com', 'type': 'INTERNET_NAME'},
+        ])
+
+    def test_targetsFromTargetFile_empty_file_should_return_empty_list(self):
+        path = self._write_target_file("# only a comment\n\n")
+        targets = SpiderFootHelpers.targetsFromTargetFile(path)
+        self.assertEqual(targets, [])
+
+    def test_targetsFromTargetFile_invalid_filename_type_should_raise_TypeError(self):
+        with self.assertRaises(TypeError):
+            SpiderFootHelpers.targetsFromTargetFile(None)
+
+    def test_targetsFromTargetFile_blank_filename_should_raise_ValueError(self):
+        with self.assertRaises(ValueError):
+            SpiderFootHelpers.targetsFromTargetFile("")
+
+    def test_targetsFromTargetFile_missing_file_should_raise_IOError(self):
+        with self.assertRaises(IOError):
+            SpiderFootHelpers.targetsFromTargetFile("/nonexistent/spiderfoot/targets.txt")
