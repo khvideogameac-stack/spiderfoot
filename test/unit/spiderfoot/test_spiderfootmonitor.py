@@ -73,6 +73,20 @@ class TestSpiderFootMonitor(unittest.TestCase):
         scans = self.monitor.scansForTarget("example.com")
         self.assertEqual(1, len(scans))
 
+    def test_monitorableTargets_requires_two_finished_scans(self):
+        now = int(time.time())
+        # target with two finished scans -> monitorable
+        self._create_scan("a1", "monitored.com", [("IP_ADDRESS", "1.1.1.1")], ended=now - 50)
+        self._create_scan("a2", "monitored.com", [("IP_ADDRESS", "1.1.1.1")], ended=now)
+        # target with only one finished scan -> not monitorable
+        self._create_scan("b1", "once.com", [("IP_ADDRESS", "2.2.2.2")], ended=now)
+
+        targets = self.monitor.monitorableTargets()
+        names = {t['target'].lower(): t['scan_count'] for t in targets}
+        self.assertIn("monitored.com", names)
+        self.assertEqual(2, names["monitored.com"])
+        self.assertNotIn("once.com", names)
+
     # ----- attackSurfaceDiff -----
 
     def test_attackSurfaceDiff_none_when_fewer_than_two_scans(self):

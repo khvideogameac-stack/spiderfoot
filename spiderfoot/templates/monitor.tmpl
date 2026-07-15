@@ -1,0 +1,104 @@
+<%include file="HEADER.tmpl"/>
+<h2>Attack Surface Monitoring</h2>
+<div style='padding-top: 15px'>
+
+<p style='font-size: 13px; color: #777'>
+Compare a target's two most recent completed scans to see how its externally-visible
+attack surface has changed &mdash; new or removed hosts, open ports, services,
+certificates, vulnerabilities and malicious/blacklist hits. Newly-appearing open ports,
+vulnerabilities and malicious findings are highlighted as high-risk.
+</p>
+
+<form class="form-inline" action='${docroot}/monitor' method='GET' style='padding-bottom: 15px'>
+    <div class="form-group">
+        <label for="target">Target:&nbsp;</label>
+        <select class="form-control" id="target" name="target" onchange="this.form.submit()">
+            <option value="">-- Select a monitored target --</option>
+            % for t in targets:
+                <option value="${t['target'] | h}" ${'selected' if target and target == t['target'] else ''}>${t['target'] | h} (${t['scan_count']} scans)</option>
+            % endfor
+        </select>
+        <noscript><button type="submit" class="btn btn-default">Show</button></noscript>
+    </div>
+</form>
+
+% if not targets:
+    <div class="alert alert-info">
+        No targets are available for monitoring yet. A target needs at least
+        <b>two completed scans</b> before its attack surface can be compared.
+        Run the same scan target again to start tracking changes.
+    </div>
+% endif
+
+% if error:
+    <div class="alert alert-warning">${error | h}</div>
+% endif
+
+% if report:
+    <%
+        added = report['added']
+        removed = report['removed']
+        high = report['high_risk_added']
+        prev = report['previous_scan']
+        curr = report['current_scan']
+    %>
+    <div class='panel panel-default'>
+        <div class='panel-body' style='font-size: 13px'>
+            <b>Target:</b> ${report['target'] | h}<br>
+            <b>Baseline scan:</b> ${prev['id'] | h} &nbsp;&mdash;&nbsp; ended ${prev['ended']}<br>
+            <b>Current scan:</b> ${curr['id'] | h} &nbsp;&mdash;&nbsp; ended ${curr['ended']}
+        </div>
+    </div>
+
+    % if high:
+        <div class="alert alert-danger">
+            <b>&#9888; ${len(high)} high-risk addition(s)</b> to the attack surface require attention.
+        </div>
+    % else:
+        <div class="alert alert-success">
+            No high-risk additions detected since the previous scan.
+        </div>
+    % endif
+
+    <div class='row'>
+        <div class='col-sm-6'>
+            <h4>New attack surface <span class="badge">${len(added)}</span></h4>
+            % if added:
+                <table class="table table-striped table-condensed">
+                    <thead><tr><th>Type</th><th>Data</th></tr></thead>
+                    <tbody>
+                    % for e in added:
+                        <tr class="${'danger' if e['high_risk'] else ''}">
+                            <td>${e['type'] | h}${' &nbsp;&#9888;' if e['high_risk'] else '' | n}</td>
+                            <td>${e['data'] | h}</td>
+                        </tr>
+                    % endfor
+                    </tbody>
+                </table>
+            % else:
+                <p style='color: #777'>Nothing new.</p>
+            % endif
+        </div>
+        <div class='col-sm-6'>
+            <h4>Removed attack surface <span class="badge">${len(removed)}</span></h4>
+            % if removed:
+                <table class="table table-striped table-condensed">
+                    <thead><tr><th>Type</th><th>Data</th></tr></thead>
+                    <tbody>
+                    % for e in removed:
+                        <tr>
+                            <td>${e['type'] | h}</td>
+                            <td>${e['data'] | h}</td>
+                        </tr>
+                    % endfor
+                    </tbody>
+                </table>
+            % else:
+                <p style='color: #777'>Nothing removed.</p>
+            % endif
+        </div>
+    </div>
+% endif
+
+</div>
+<%include file="FOOTER.tmpl"/>

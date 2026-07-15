@@ -37,6 +37,7 @@ from sfscan import startSpiderFootScanner
 
 from spiderfoot import SpiderFootDb
 from spiderfoot import SpiderFootHelpers
+from spiderfoot import SpiderFootMonitor
 from spiderfoot import __version__
 from spiderfoot.logger import logListenerSetup, logWorkerSetup
 
@@ -919,6 +920,77 @@ class SpiderFootWebUi:
         return templ.render(pageid='NEWSCAN', types=types, docroot=self.docroot,
                             modules=self.config['__modules__'], scanname="",
                             selectedmods="", scantarget="", version=__version__)
+
+    @cherrypy.expose
+    def monitor(self: 'SpiderFootWebUi', target: str = None) -> str:
+        """Continuous attack-surface monitoring page.
+
+        Shows how a target's externally-visible attack surface has changed
+        between its two most recent completed scans.
+
+        Args:
+            target (str): target to show the attack-surface diff for
+
+        Returns:
+            str: monitoring page HTML
+        """
+        dbh = SpiderFootDb(self.config)
+        mon = SpiderFootMonitor(dbh)
+
+        targets = mon.monitorableTargets()
+
+        report = None
+        error = None
+        if target:
+            target = self.cleanUserInput([target])[0]
+            try:
+                report = mon.attackSurfaceDiff(target)
+            except Exception as e:
+                self.log.error(f"Attack surface diff failed for '{target}': {e}")
+                report = None
+            if report is None:
+                error = f"Need at least two completed scans of '{target}' to compare."
+
+        templ = Template(filename='spiderfoot/templates/monitor.tmpl', lookup=self.lookup)
+        return templ.render(pageid='MONITOR', docroot=self.docroot, version=__version__,
+                            targets=targets, target=target, report=report, error=error)
+
+    @cherrypy.expose
+    @cherrypy.tools.json_out()
+    def monitordiff(self: 'SpiderFootWebUi', target: str = None, scan1: str = None,
+                    scan2: str = None, allevents: str = None) -> dict:
+        """Return the attack-surface diff for a target (or two scans) as JSON.
+
+        Args:
+            target (str): target to compare its two most recent scans
+            scan1 (str): baseline scan ID (use with scan2)
+            scan2 (str): current scan ID (use with scan1)
+            allevents (str): if set, compare all event types, not just attack surface
+
+        Returns:
+            dict: diff report, or an error object
+        """
+        dbh = SpiderFootDb(self.config)
+        mon = SpiderFootMonitor(dbh)
+        only_attack_surface = not allevents
+
+        try:
+            if scan1 and scan2:
+                diff = mon.diffScans(scan1, scan2, onlyAttackSurface=only_attack_surface)
+                diff['target'] = target or f"{scan1}..{scan2}"
+                return diff
+
+            if not target:
+                return {"error": "Specify a target, or both scan1 and scan2."}
+
+            target = self.cleanUserInput([target])[0]
+            report = mon.attackSurfaceDiff(target, onlyAttackSurface=only_attack_surface)
+            if report is None:
+                return {"error": f"Need at least two completed scans of '{target}' to compare."}
+            return report
+        except Exception as e:
+            self.log.error(f"monitordiff failed: {e}")
+            return {"error": str(e)}
 
     @cherrypy.expose
     def clonescan(self: 'SpiderFootWebUi', id: str) -> str:

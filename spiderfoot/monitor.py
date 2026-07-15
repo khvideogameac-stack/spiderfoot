@@ -95,6 +95,30 @@ class SpiderFootMonitor():
             return True
         return eventType.startswith(cls.HIGH_RISK_PREFIXES)
 
+    def monitorableTargets(self) -> typing.List[dict]:
+        """List targets that can be monitored (have >= 2 completed scans).
+
+        Returns:
+            list: dicts with 'target' and 'scan_count' keys, sorted by target.
+        """
+        counts: typing.Dict[str, int] = dict()
+        display: typing.Dict[str, str] = dict()
+
+        for row in self.dbh.scanInstanceList():
+            # row: guid, name, seed_target, created, started, ended, status, count
+            if row[6] != "FINISHED":
+                continue
+            key = str(row[2]).strip().lower()
+            counts[key] = counts.get(key, 0) + 1
+            display.setdefault(key, row[2])
+
+        targets = [
+            {'target': display[k], 'scan_count': c}
+            for k, c in counts.items() if c >= 2
+        ]
+        targets.sort(key=lambda t: t['target'].lower())
+        return targets
+
     def scansForTarget(self, target: str, finishedOnly: bool = True) -> typing.List[dict]:
         """List scans for a target, most recent first.
 
